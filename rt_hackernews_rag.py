@@ -1,21 +1,15 @@
 """Fetch the home page of hackernews every 15 mins and extract all the links from there."""
-from datetime import timedelta
 import requests
+from datetime import datetime, timedelta
+import time
+from typing import Any, Optional
 
-from bytewax.connectors.periodic import SimplePollingInput
 from bytewax.connectors.stdio import StdOutput
 from bytewax.dataflow import Dataflow
 
-from webpage import safe_request
-
-from unstructured.partition.html import partition_html
-from unstructured.cleaners.core import (
-    clean,
-    replace_unicode_quotes,
-    clean_non_ascii_chars,
-)
-from unstructured.staging.huggingface import chunk_by_attention_window
-from unstructured.staging.huggingface import stage_for_transformers
+from hackernews_connector import HNInput
+from redis_connector import RedisVectorOutput
+from utils import safe_request, parse_html, hf_document_embed
 
 from transformers import AutoTokenizer, AutoModel
 import torch
@@ -23,82 +17,71 @@ import torch
 tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
 model = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
 
+import logging
 
-class HNInput(SimplePollingInput):
-    def next_item(self):
-        # Extract the first 10 item ids from newstories api.
-        # You can then use the id to fetch metadata about
-        # an hackernews item
-        return requests.get(
-            "https://hacker-news.firebaseio.com/v0/newstories.json"
-        ).json()[:10]
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-
+VECTOR_DIMENSIONS = 512
+SCHEMA = {
+    "index": {
+        "name": "story_index",
+        "prefix": "v1",
+    },
+    "fields": {
+        "tag": [{"name": "key_id"}],
+        "text": [{"name": "by"}],
+        "numeric": [{"name": "descendants"}],
+        "numeric": [{"name": "id"}],
+        "numeric": [{"name": "score"}],
+        "numeric": [{"name": "time"}],
+        "text": [{"name": "title"}],
+        "text": [{"name": "type"}],
+        "text": [{"name": "url"}],
+        "text": [{"name": "text"}],
+        "vector": [{
+                "name": "doc_embedding",
+                "dims": VECTOR_DIMENSIONS,
+                "distance_metric": "cosine",
+                "algorithm": "flat",
+                "datatype": "FLOAT32"}
+        ]
+    },
+}
+    
 def download_metadata(hn_id):
     # Given an hacker news id returned from the api, fetch metadata
-    return requests.get(
+    req = requests.get(
         f"https://hacker-news.firebaseio.com/v0/item/{hn_id}.json"
-    ).json()
-
-
-def download_content(metadata):
-    print(metadata)
-    content = safe_request(metadata["url"])
-    # only return a dict with metadata plus the 
-    # content of the page if we could get it
-    if content:
-        return {**metadata, "content": content}
-    else: 
-        print(f"Couldn't return content from {metadata['url']}")
-     
-
-def parse_html(metadata_content, tokenizer):
-    try:
-        print(f"parsing content from: {metadata_content['url']} - {metadata_content['content'][:200]}")
-    except TypeError:
-        print(f"moving on... can't parse: {metadata_content}")
-        return None
-    text = []
-    article_elements = partition_html(text=metadata_content["content"])
-    article_content = clean_non_ascii_chars(
-        replace_unicode_quotes(
-            clean(
-                " ".join(
-                    [
-                        str(x) if x.to_dict()["type"] == "NarrativeText" else ""
-                        for x in article_elements
-                    ]
-                )
-            )
-        )
     )
-    text += chunk_by_attention_window(article_content, tokenizer)
-    return {**metadata_content, "text": text}
+    if not req.json():
+        logger.warning(f"error getting payload from item {hn_id} trying again")
+        time.sleep(0.5)
+        return download_metadata(hn_id)
+    return req.json()
 
-def hf_document_embed(webpage, tokenizer, model, length=512):
-    """
-    Create an embedding from the provided document
-    """
-    embeddings = []
-    for chunk in webpage["text"]:
-        inputs = tokenizer(chunk, padding=True, truncation=True, return_tensors="pt", max_length=length)
-        with torch.no_grad():
-            embed = model(**inputs).last_hidden_state[:, 0].cpu().detach().numpy()
-        embeddings.append(embed.flatten().tolist())
-    return {**webpage, "embeddings": embeddings}
+def download_html(metadata):
+    try:
+        html = safe_request(metadata["url"])
+        return {**metadata, "content":html}
+    except KeyError:
+        logger.error(f"No url content for {metadata}")
+        return None
 
-flow = Dataflow()
-flow.input("in", HNInput(timedelta(minutes=15)))
-flow.flat_map(lambda x: x)
-# flow.inspect(print)
-# If you run this dataflow with multiple workers, downloads in
-# the next `map` will be parallelized thanks to .redistribute()
-flow.redistribute()
-flow.map(download_metadata)
-flow.filter(lambda x: "url" in x.keys())
-# flow.inspect(print)
-flow.map(download_content)
-flow.map(lambda x: parse_html(x, tokenizer))
-flow.map(lambda x: hf_document_embed(x, tokenizer, model, length=512))
-flow.output("out", StdOutput())
-# flow.output(RedisVectorStore())
+
+def run_hn_flow(init_item=None, polling_interval=15): 
+    flow = Dataflow()
+    flow.input("in", HNInput(timedelta(seconds=polling_interval), None, init_item)) # skip the align_to argument
+    # If you run this dataflow with multiple workers, downloads in
+    # the next `map` will be parallelized thanks to .redistribute()
+    flow.redistribute()
+    flow.map(download_metadata)
+    flow.inspect(logger.info)
+    flow.filter(lambda document: document["type"]=="story")
+    flow.map(download_html)
+    flow.map(lambda document: parse_html(document, tokenizer))
+    flow.filter(lambda x: x != None)
+    flow.map(lambda document: hf_document_embed(document, tokenizer, model, torch, length=VECTOR_DIMENSIONS))
+    flow.inspect(logger.info)
+    flow.output("std-out", RedisVectorOutput("hn_stories", SCHEMA, overwrite=True))
+    return flow

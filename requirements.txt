@@ -1,4 +1,6 @@
-torch
-transformers
-unstructured
-bytewax
+torch==2.0.1
+transformers==4.33.2
+unstructured==0.10.15
+bytewax==0.17.2
+redisvl==0.0.4
+fake-useragent==1.2.1
