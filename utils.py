@@ -1,8 +1,10 @@
 import time
-
+import html
 import requests
-from fake_useragent import UserAgent
 from requests.exceptions import RequestException
+import re
+
+from fake_useragent import UserAgent
 
 from unstructured.partition.html import partition_html
 from unstructured.cleaners.core import (
@@ -17,6 +19,8 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+pattern = re.compile('<.*?>')
 
 def safe_request(url, headers={}, wait_time=1, max_retries=3):
     if headers == {}:
@@ -52,6 +56,12 @@ def safe_request(url, headers={}, wait_time=1, max_retries=3):
 
     return html
 
+def prep_text(metadata_content, tokenizer):
+    metadata_content["text"] = html.unescape(metadata_content["text"])
+    metadata_content["text"] = re.sub(pattern, '', metadata_content["text"])
+    metadata_content["text"] = clean_non_ascii_chars(replace_unicode_quotes(metadata_content["text"]))
+    metadata_content["text"] = chunk_by_attention_window(metadata_content["text"], tokenizer)
+    return metadata_content
 
 def parse_html(metadata_content, tokenizer):
     try:
@@ -66,7 +76,7 @@ def parse_html(metadata_content, tokenizer):
             clean(
                 " ".join(
                     [
-                        " ".join(str(x).replace("\\n","").replace("\\t","").split()) if x.to_dict()["type"] == "NarrativeText" else ""
+                        " ".join(str(html.unescape(x)).replace("\\n","").replace("\\t","").split()) if x.to_dict()["type"] == "NarrativeText" else ""
                         for x in article_elements
                     ]
                 )

@@ -1,18 +1,23 @@
-from typing import Optional
+from dataclasses import dataclass
 import requests
 from datetime import datetime, timedelta, timezone
+from typing import Callable, List, Optional, Tuple, TypeVar
 
-from bytewax.inputs import PartitionedInput, StatefulSource
+from bytewax.inputs import FixedPartitionedSource, StatefulSourcePartition
 
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-    
 
-class _HNSource(StatefulSource):
+class _HNSourcePartition(StatefulSourcePartition[List[int], Optional[int]]):
     def __init__(
-        self, interval, align_to, init_id, resume_state, now_getter=lambda: datetime.now(timezone.utc)
+        self,
+        now: datetime,
+        interval: timedelta, 
+        align_to: Optional[datetime], 
+        init_id: Optional[int],
+        resume_state: Optional[int]
     ):
         self._interval = interval
         if resume_state:
@@ -22,7 +27,6 @@ class _HNSource(StatefulSource):
         else:
             self.starting_id = requests.get("https://hacker-news.firebaseio.com/v0/maxitem.json").json()
 
-        now = now_getter()
         if align_to is not None:
             # Hell yeah timedelta implements remainder.
             since_last_awake = (now - align_to) % interval
@@ -37,22 +41,22 @@ class _HNSource(StatefulSource):
         else:
             self._next_awake = now
 
-    def next_batch(self):
+    def next_batch(self, _sched: datetime) -> List[int]:
         self._next_awake += self._interval
-        self.current_id = requests.get("https://hacker-news.firebaseio.com/v0/maxitem.json").json()
+        self.current_id = int(requests.get("https://hacker-news.firebaseio.com/v0/maxitem.json").json())
         batch = list(range(self.starting_id, self.current_id))
         self.starting_id = self.current_id
 
         return batch
 
-    def next_awake(self):
+    def next_awake(self) -> Optional[datetime]:
         return self._next_awake
 
-    def snapshot(self):
+    def snapshot(self) -> Optional[int]:
         return self.current_id
 
 
-class HNInput(PartitionedInput):
+class HNSource(FixedPartitionedSource):
     """Calls a Hacker News API at a regular interval.
 
     There is no parallelism; only one worker will poll this source.
@@ -67,9 +71,12 @@ class HNInput(PartitionedInput):
 
     """
 
-    def __init__(self, interval: timedelta, align_to: Optional[datetime] = None, init_id: Optional[int] = None):
+    def __init__(
+            self, 
+            interval: timedelta, 
+            align_to: Optional[datetime] = None, 
+            init_id: Optional[int] = None):
         """Init.
-
         Args:
             interval:
                 The interval between calling `next_item`.
@@ -78,16 +85,15 @@ class HNInput(PartitionedInput):
                 now.
             init_id:
                 item id to start from
-
         """
         self._interval = interval
         self._align_to = align_to
         self._init_id = init_id
 
-    def list_parts(self):
+    def list_parts(self) -> List[str]:
         """Assumes the source has a single partition."""
         return ["singleton"]
 
-    def build_part(self, _for_part, _resume_state):
-        """See ABC docstring."""
-        return _HNSource(self._interval, self._align_to, self._init_id, _resume_state)
+    def build_part(self, _now: datetime, part_key: str, resume_state: Optional[int]) -> _HNSourcePartition:
+        """Called for each partition, limited to one part to avoid duplication"""
+        return _HNSourcePartition(_now, self._interval, self._align_to, self._init_id, resume_state)
