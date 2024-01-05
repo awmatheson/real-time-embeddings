@@ -10,14 +10,15 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 class _HNSourcePartition(StatefulSourcePartition[List[int], Optional[int]]):
     def __init__(
         self,
         now: datetime,
-        interval: timedelta, 
-        align_to: Optional[datetime], 
+        interval: timedelta,
+        align_to: Optional[datetime],
         init_id: Optional[int],
-        resume_state: Optional[int]
+        resume_state: Optional[int],
     ):
         self._interval = interval
         if resume_state:
@@ -25,7 +26,9 @@ class _HNSourcePartition(StatefulSourcePartition[List[int], Optional[int]]):
         elif init_id:
             self.starting_id = init_id
         else:
-            self.starting_id = requests.get("https://hacker-news.firebaseio.com/v0/maxitem.json").json()
+            self.starting_id = requests.get(
+                "https://hacker-news.firebaseio.com/v0/maxitem.json"
+            ).json()
 
         if align_to is not None:
             # Hell yeah timedelta implements remainder.
@@ -43,7 +46,9 @@ class _HNSourcePartition(StatefulSourcePartition[List[int], Optional[int]]):
 
     def next_batch(self, _sched: datetime) -> List[int]:
         self._next_awake += self._interval
-        self.current_id = int(requests.get("https://hacker-news.firebaseio.com/v0/maxitem.json").json())
+        self.current_id = int(
+            requests.get("https://hacker-news.firebaseio.com/v0/maxitem.json").json()
+        )
         batch = list(range(self.starting_id, self.current_id))
         self.starting_id = self.current_id
 
@@ -72,10 +77,11 @@ class HNSource(FixedPartitionedSource):
     """
 
     def __init__(
-            self, 
-            interval: timedelta, 
-            align_to: Optional[datetime] = None, 
-            init_id: Optional[int] = None):
+        self,
+        interval: timedelta,
+        align_to: Optional[datetime] = None,
+        init_id: Optional[int] = None,
+    ):
         """Init.
         Args:
             interval:
@@ -94,6 +100,10 @@ class HNSource(FixedPartitionedSource):
         """Assumes the source has a single partition."""
         return ["singleton"]
 
-    def build_part(self, _now: datetime, part_key: str, resume_state: Optional[int]) -> _HNSourcePartition:
+    def build_part(
+        self, _now: datetime, part_key: str, resume_state: Optional[int]
+    ) -> _HNSourcePartition:
         """Called for each partition, limited to one part to avoid duplication"""
-        return _HNSourcePartition(_now, self._interval, self._align_to, self._init_id, resume_state)
+        return _HNSourcePartition(
+            _now, self._interval, self._align_to, self._init_id, resume_state
+        )

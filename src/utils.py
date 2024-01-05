@@ -20,7 +20,8 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-pattern = re.compile('<.*?>')
+pattern = re.compile("<.*?>")
+
 
 def safe_request(url, headers={}, wait_time=1, max_retries=3):
     if headers == {}:
@@ -53,30 +54,45 @@ def safe_request(url, headers={}, wait_time=1, max_retries=3):
             logger.info(f"Retrying in {current_wait_time} seconds...")
             time.sleep(current_wait_time)
             i += 1
-
     return html
+
 
 def prep_text(metadata_content, tokenizer):
     metadata_content["text"] = html.unescape(metadata_content["text"])
-    metadata_content["text"] = re.sub(pattern, '', metadata_content["text"])
-    metadata_content["text"] = clean_non_ascii_chars(replace_unicode_quotes(metadata_content["text"]))
-    metadata_content["text"] = chunk_by_attention_window(metadata_content["text"], tokenizer)
+    metadata_content["text"] = re.sub(pattern, "", metadata_content["text"])
+    metadata_content["text"] = clean_non_ascii_chars(
+        replace_unicode_quotes(metadata_content["text"])
+    )
+    metadata_content["text"] = chunk_by_attention_window(
+        metadata_content["text"], tokenizer
+    )
     return metadata_content
+
 
 def parse_html(metadata_content, tokenizer):
     try:
-        logger.info(f"parsing content from: {metadata_content['url']} - {metadata_content['content'][:200]}")
+        logger.info(
+            f"parsing content from: {metadata_content['url']} - {metadata_content['content'][:200]}"
+        )
     except TypeError:
         logger.info(f"moving on... can't parse: {metadata_content}")
         return None
     text = []
     article_elements = partition_html(text=metadata_content["content"])
+    breakpoint()
     article_content = clean_non_ascii_chars(
         replace_unicode_quotes(
             clean(
                 " ".join(
                     [
-                        " ".join(str(html.unescape(x)).replace("\\n","").replace("\\t","").split()) if x.to_dict()["type"] == "NarrativeText" else ""
+                        " ".join(
+                            str(html.unescape(x.text))
+                            .replace("\\n", "")
+                            .replace("\\t", "")
+                            .split()
+                        )
+                        if x.to_dict()["type"] == "NarrativeText"
+                        else ""
                         for x in article_elements
                     ]
                 )
@@ -84,9 +100,10 @@ def parse_html(metadata_content, tokenizer):
         )
     )
     text += chunk_by_attention_window(article_content, tokenizer)
-    #remove the content after it is cleaned
+    # remove the content after it is cleaned
     metadata_content.pop("content")
     return {**metadata_content, "text": text}
+
 
 def hf_document_embed(document, tokenizer, model, torch, length=512):
     """
@@ -95,13 +112,17 @@ def hf_document_embed(document, tokenizer, model, torch, length=512):
     text_chunks = document.pop("text")
     documents = []
     for i, chunk in enumerate(text_chunks):
-        inputs = tokenizer(chunk, padding=True, truncation=True, return_tensors="pt", max_length=length)
+        inputs = tokenizer(
+            chunk, padding=True, truncation=True, return_tensors="pt", max_length=length
+        )
         with torch.no_grad():
             embed = model(**inputs).last_hidden_state[:, 0].cpu().detach().numpy()
-        documents.append({
-            "key_id":f"{document['id']}_{i}",
-            **document, 
-            "text":chunk,
-            "doc_embedding":embed.flatten().tobytes()
-        })
+        documents.append(
+            {
+                "key_id": f"{document['id']}_{i}",
+                **document,
+                "text": chunk,
+                "doc_embedding": embed.flatten().tobytes(),
+            }
+        )
     return documents
